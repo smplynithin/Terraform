@@ -251,6 +251,16 @@ Terraform provisions the Secrets Manager entry / SSM parameter (or security team
 
 **Local machine**: still used for `terraform plan` while writing/testing code before it hits the pipeline — normal dev workflow. The correction isn't "no config on local," it's "no *static* long-lived credentials, anywhere — local or pipeline." Local uses temporary SSO/assume-role credentials instead.
 
+How it actually works: instead of you manually pasting a secret into Jenkins's credential store, this plugin surfaces secrets already sitting in AWS Secrets Manager as if they were native Jenkins credentials — Jenkins queries Secrets Manager at build time and the value is never persisted in Jenkins's own credential database. You reference it the same way (credentials('my-secret-id')), but nothing static is stored on the Jenkins side.
+
+The catch you should catch yourself: this solves secret storage, not the underlying chicken-and-egg problem — Jenkins still has to authenticate to AWS Secrets Manager to fetch anything. That authentication step needs one of:
+
+Instance profile on the EC2 box running Jenkins (best — no keys anywhere)
+IRSA if the Jenkins agent runs as an EKS pod
+A static AWS key, if neither of the above is possible
+
+So the plugin removes static app-level secrets (DB passwords, API tokens) from Jenkins's store — but the AWS-auth-for-Jenkins-itself problem still resolves to instance profile/IRSA vs static keys, same as before. It doesn't eliminate that layer, it just moves the "what's stored where" question one level down.
+
 ## 7. Senior-level framing for interviews
 
 "Credentials configured" signals static keys. "IAM role attached to the execution identity" signals you understand least-privilege and rotation. Lead with the second phrasing.

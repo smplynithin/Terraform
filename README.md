@@ -1,236 +1,264 @@
-# Terraform Revision Notes — 3 YOE DevOps
+# Terraform Revision — DevOps Engineer (3-4 YoE Level)
 
-## 1. Core & Lifecycle
-- IaC, declarative, provider-agnostic. HCL = `.tf` files (JSON-compatible).
-- Lifecycle: **Write → Init → Validate → Plan → Apply → Destroy**
-- `plan`/`apply` auto-refresh state against real infra before diffing.
-- Providers = plugins talking to target APIs (AWS, Azure, GCP, K8s, Helm).
+## 1. Core & Architecture
+
+**Terraform** — HashiCorp's declarative, provider-agnostic IaC tool. You describe desired end-state; Terraform figures out the diff and applies it.
+
+**Lifecycle**: Write → Init → Validate → Plan → Apply → Destroy. `plan`/`apply` silently do a state **refresh** first (compares real infra vs recorded state).
+
+**Real-time example**: At HCL, if you provision an EKS cluster + node group + VPC via Terraform, a teammate manually resizing the node group in AWS console causes drift — next `plan` shows a diff even though you changed nothing in code.
 
 ## 2. Block Types
-| Block | Purpose |
-|---|---|
-| `terraform{}` | required_version, required_providers, backend |
-| `provider{}` | region, alias, credentials |
-| `resource "type" "name"{}` | managed infra object |
-| `data "type" "name"{}` | read-only fetch |
-| `variable "name"{}` | input param |
-| `output "name"{}` | expose value |
-| `locals{}` | internal reusable values |
-| `module "name"{}` | call reusable child module |
+
+- `terraform{}` — required_version, required_providers, backend config
+- `provider{}` — region, alias, credentials
+- `resource "type" "name" {}` — a managed object
+- `data "type" "name" {}` — read-only fetch of existing/external object
+- `variable "name" {}` — input parameter
+- `output "name" {}` — exposes value to caller/CLI
+- `locals {}` — internal computed values, not exposed as I/O
+- `module "name" {}` — calls a reusable child module
+
+**Example**: `data "aws_vpc" "existing"` to pull an already-created shared VPC's ID instead of hardcoding it — common when platform team owns networking and app team consumes it.
 
 ## 3. CLI Commands
-```
-terraform init        # download providers/modules, setup backend
-terraform validate    # syntax/config check, no API calls
-terraform fmt -check  # format, CI gate
-terraform plan -out=plan.tfplan
-terraform apply -auto-approve | apply plan.tfplan
-terraform destroy -target=<addr>
-terraform output
-terraform show
-terraform console      # interactive expression evaluation (REPL) — often missed
-```
+
+`init`, `validate`, `fmt` (`-check` for CI), `plan` (`-out=plan.tfplan`), `apply` (`-auto-approve`, or `apply plan.tfplan`), `destroy` (`-target` for partial), `output`, `show`.
+
+**Real-time**: In a pipeline, never use `-auto-approve` on `prod` — always gate with a manual approval step after `plan`.
 
 ## 4. Meta-Arguments
-- `count` → index via `count.index`
-- `for_each` → key via `each.key` / `each.value`
-- `for_each` safer than `count` — avoids index-shift on reorder/removal
-- `depends_on` → explicit dependency (prefer implicit via reference)
+
+- `count` — numeric replication, `count.index`
+- `for_each` — map/set replication, `each.key`/`each.value`
+- `for_each` is safer than `count` — removing a middle item with `count` shifts every subsequent index and forces unwanted destroy/recreate; `for_each` keys are stable.
+- `depends_on` — explicit dependency when no attribute reference exists.
+
+**Example**: Creating 3 EC2 instances with different names/tags → use `for_each` over a map, not `count`, so deleting instance "web-2" doesn't recreate "web-3".
 
 ## 5. Lifecycle Block
-- `create_before_destroy`, `prevent_destroy`, `ignore_changes = [attr]` / `all`
-- `replace_triggered_by` — force replace on referenced value change
-- `precondition{}` / `postcondition{}` (1.2+) — custom validation
+
+Nested in a `resource`:
+- `create_before_destroy` — new resource up before old is torn down (zero-downtime replace)
+- `prevent_destroy` — blocks destroy/replace (protect RDS/state buckets)
+- `ignore_changes` — ignore drift on listed attrs or `all`
+- `replace_triggered_by` — force replace when a referenced value changes
+- `precondition{}` / `postcondition{}` — custom validation (1.2+)
+
+**Real-time**: ASG `desired_capacity` is managed by an autoscaler at runtime → `ignore_changes = [desired_capacity]` so Terraform doesn't fight the scaler on every apply.
 
 ## 6. Dependency Graph
-- Terraform builds a DAG. Implicit (via reference, preferred) vs explicit (`depends_on`).
-- `terraform graph` → DOT format, visualize with Graphviz.
-- Graph decides parallel vs sequential execution order.
 
-## 7. Variables / Outputs / Locals
-- Types: string, number, bool, list, map, set, object, tuple, any
-- Precedence (low→high): defaults < `TF_VAR_*` env < `.tfvars` < `auto.tfvars` < `-var-file` < `-var` (CLI wins)
-- `sensitive = true` masks CLI output only — still plaintext in state.
+Terraform builds a DAG. Implicit dependency (via attribute reference) is preferred and auto-detected; `depends_on` is the fallback when there's no direct reference (e.g., IAM eventual consistency). `terraform graph` outputs DOT format for Graphviz. The graph also decides what can run in parallel.
 
-## 8. Provider Config
-- `alias` for multi-region/multi-account setups.
-- `.terraform.lock.hcl` — locks exact provider versions, **commit this**.
-- `default_tags` (AWS provider) — auto-tags all resources under that provider.
+## 7. Variables, Outputs, Locals
+
+Types: string, number, bool, list, map, set, object, tuple, any.
+
+Precedence (low→high): defaults < `TF_VAR_*` env < `.tfvars` < `*.auto.tfvars` < `-var-file` < `-var` (CLI flag wins).
+
+`output` supports `sensitive` and `depends_on`. `locals` = DRY reusable expressions scoped to a module.
+
+**Example**: `TF_VAR_db_password` set as a pipeline secret env var rather than in any `.tfvars` file — keeps it out of git entirely.
+
+## 8. Provider Configuration
+
+`alias` for multi-region/multi-account setups. `required_providers{}` with version constraints (`~>`, `>=`, `=`). `.terraform.lock.hcl` locks exact provider versions — **commit this**. `default_tags` (AWS provider) auto-tags every resource in that provider config.
+
+**Example**:
+```hcl
+provider "aws" {
+  alias  = "us_east"
+  region = "us-east-1"
+}
+resource "aws_acm_certificate" "cert" {
+  provider = aws.us_east   # CloudFront certs must be in us-east-1
+}
+```
 
 ## 9. State Management
-- `terraform.tfstate` = JSON map of config → real resource IDs/attrs.
-- Local vs remote state — remote = team collaboration, single source of truth.
-- **Never commit state to Git.** Sensitive values stored in plaintext — encrypt backend.
 
-### State splitting strategy
-- Per environment (dev/stage/prod) — blast-radius control.
-- Per layer/module (network/platform/app) — smaller/faster plans, independent ownership.
-- Trade-off: more state files = more cross-state lookups.
-- Common key pattern: `env/component/terraform.tfstate`
+`terraform.tfstate` — JSON mapping config → real resource IDs/attributes. Remote state (S3, Azure Blob, GCS, TFC) is the norm for teams: single source of truth, avoids stale local state, enables locking. **Sensitive values are stored in plaintext in state** — encrypt the backend. Never commit state to git.
+
+**Split strategy**:
+- Per environment (dev/stage/prod) — blast-radius control
+- Per layer/module (network, platform, app) — smaller/faster plans, independent ownership
+- Trade-off: more state files = more cross-state lookups via `terraform_remote_state`
 
 ## 10. Remote Backends
-- **S3 + DynamoDB** (AWS): S3 = storage, DynamoDB = lock table.
-- **New in TF 1.10+**: native S3 locking via `use_lockfile = true` — DynamoDB no longer mandatory (often missed in older notes).
-- Azure: `azurerm` → Storage Account + Blob container.
-- GCS backend (GCP), Terraform Cloud/Enterprise (built-in locking).
-- Backend block: partial config allowed (`-backend-config=` at init); **cannot use variables/interpolation**.
 
-## 11. Cross-State / Module Communication
-- `terraform_remote_state` data source — reads another module's outputs (read-only).
-- Modules don't talk to each other directly — root module wires them: `module.A.output_x` → input of `module "B"`.
-- Use case: network team's VPC/subnet IDs consumed by app team.
+- AWS: S3 (storage) + DynamoDB (lock table) — **note**: since Terraform 1.10, S3 backend supports native state locking without DynamoDB (`use_lockfile = true`), though DynamoDB is still widely used in existing setups.
+- Azure: `azurerm` backend → Storage Account + Blob container
+- GCP: GCS backend
+- Terraform Cloud/Enterprise: built-in locking
 
-## 12. Modules
+Backend block allows partial config (`-backend-config=` at init) and **cannot use variables/interpolation**.
+
+## 11. Cross-State Communication
+
+`terraform_remote_state` data source reads another module's outputs from its state file (read-only). Use case: network team's VPC/subnet IDs consumed by the app team. Requires read access to the source backend (e.g., S3 bucket IAM perms).
+
+Modules never talk to each other directly — the root module wires them: `module.vpc.private_subnet_id` passed as an input to `module "ec2"`.
+
+## 12. Module Design
+
 ```
+modules/vpc, modules/ec2, modules/rds   (each: main.tf, variables.tf, outputs.tf)
 root: module "vpc" { source = "./modules/vpc"; cidr = var.cidr }
 root: module "ec2" { source = "./modules/ec2"; subnet_id = module.vpc.private_subnet_id }
 ```
-- Registry/versioned source for shared org modules: `source`, `version`.
+For shared org modules, use a registry/versioned source (`source`, `version`).
 
-## 13. Workspaces vs Env Directories
-- `terraform workspace new/list/select/show/delete`; `${terraform.workspace}` in config.
-- Workspaces = light isolation only, shared backend config — **not** a substitute for full env separation.
-- Separate env directories (`environments/dev`, `environments/prod`) — full isolation, own backend/tfvars/state, different approvers per env. Preferred in most companies for prod-grade separation. Trade-off: code duplication, mitigated by shared `modules/`.
+## 13. Workspaces vs Separate Env Directories
+
+`terraform workspace new/list/select/show/delete`. `${terraform.workspace}` usable in config. Workspaces = same config, multiple states — light isolation only.
+
+**Separate directory approach** (environments/dev, environments/stage, environments/prod, each with own backend.tf and tfvars) gives full isolation, explicit blast radius, different approvers/variables per env. More common in production companies than raw workspaces, at the cost of some duplication (mitigated via shared `modules/`).
 
 ## 14. Repo Structure (Common Pattern)
+
 ```
-modules/            # reusable building blocks
-environments/dev/   # main.tf, variables.tf, backend.tf, tfvars
-environments/prod/  # isolated state/backend
-global/             # account-level (IAM, DNS)
+modules/         -> reusable building blocks
+environments/dev/prod -> main.tf, variables.tf, backend.tf, tfvars, own state
+global/          -> account-level resources (IAM, DNS)
+versions.tf, README.md per module
 ```
 
-## 15. Data Sources
-- Read-only fetch, no lifecycle management. e.g. `data "aws_ami"`, `data "aws_vpc"`.
+## 15. Data Sources vs Resources
+
+`data` blocks = read-only fetch, no lifecycle management (`data "aws_ami"`, `data "aws_vpc"`). `resource` blocks = Terraform owns create/update/destroy.
 
 ## 16. Expressions & Functions
-- Conditional: `condition ? true_val : false_val`
-- `for` expression: `[for x in list : x.name]`
-- `dynamic` blocks — generate nested blocks programmatically.
-- Common fns: `lookup()`, `merge()`, `join()`, `split()`, `coalesce()`, `templatefile()`, `file()`, `jsonencode()`, `try()`, `element()`
 
-## 17. Drift & Refresh
-- Drift = real infra ≠ state (manual console change, external process).
-- Detected via `plan` or `refresh`.
-- `ignore_changes = [attr]` — silence expected drift (e.g. autoscaler-managed `desired_count`).
-- `terraform apply -refresh-only` — sync state to reality without changing infra.
+Interpolation `"${var.x}"` (implicit in most HCL2 contexts). Conditional: `condition ? true_val : false_val`. `for` expression: `[for x in list : x.name]`. `dynamic` blocks generate nested blocks programmatically (e.g., variable number of ingress rules in a security group).
 
-## 18. State Commands
-```
-terraform state list
-terraform state show <addr>
-terraform state mv <old> <new>   # rename/move, no destroy-recreate
-terraform state rm <addr>        # stop tracking; infra stays
-terraform state pull / push      # raw state backup/restore
-```
+Common functions: `lookup()`, `merge()`, `join()`, `split()`, `coalesce()`, `templatefile()`, `file()`, `jsonencode()`, `try()`, `element()`.
 
-## 19. Import / Taint / Replace / Moved (gap-filled)
-- `terraform import <addr> <id>` — needs matching resource block written first; does **not** generate config.
-- `taint` (deprecated) → `terraform apply -replace=<addr>`
-- **Import block (1.5+)**: declarative import via `import { to = ..., id = ... }` in `.tf` — can generate config with `-generate-config-out`. Commonly missed vs CLI import.
-- **`moved` block (1.5+)**: refactor-safe renames across resources/modules without state surgery — replaces manual `state mv` in code-reviewable form.
+**Example**: `dynamic "ingress"` block looping over a list of allowed ports from a variable, instead of writing a separate `ingress{}` block per port.
+
+## 17. State Drift
+
+Drift = real infra ≠ state (manual console change, external automation). Detected via `plan` (unexpected diff) or `refresh`. `ignore_changes = [attr1, attr2]` or `all` silences expected drift. `terraform apply -refresh-only` syncs state to reality without changing infra.
+
+## 18. State Manipulation Commands
+
+`state list`, `state show <addr>`, `state mv <old> <new>` (rename/move without destroy-recreate), `state rm <addr>` (stop tracking; infra stays), `state pull` / `state push` (raw backups).
+
+**Real-time**: Renaming a resource in code (e.g., `aws_instance.web` → `aws_instance.app_server`) without `state mv` first will make Terraform plan to destroy the old and create a new one — `state mv` avoids that.
+
+## 19. Import / Taint / Replace
+
+`terraform import <addr> <id>` brings an existing resource under management — needs a matching `resource` block written first, and import **does not generate config**, only state. `terraform taint` is deprecated → use `terraform apply -replace=<addr>`.
+
+**Newer (1.5+)**: `import {}` config blocks + `terraform plan -generate-config-out=` can generate HCL automatically from real resources — worth mentioning in interviews as the modern replacement for manual `terraform import`.
 
 ## 20. State Recovery & DR
-- Always `terraform state pull > backup.tfstate` before risky ops.
-- S3: enable bucket versioning — restore prior object version.
-- No backup: rebuild via `terraform import` per resource (last resort).
-- DR checklist: S3 versioning + SSE, DynamoDB PITR, cross-region replication, least-privilege IAM, documented import runbook, pre-change backup in CI/CD.
+
+Always `terraform state pull > backup.tfstate` before risky operations. S3 backend: enable bucket versioning to restore a prior object version. No backup as last resort: rebuild via `import` per resource. Test recovery periodically.
+
+**DR checklist**: S3 versioning + SSE encryption on state bucket; DynamoDB PITR on lock table; cross-region replication for critical envs; least-privilege IAM + CloudTrail audit; documented import runbook; pre-change backup step in CI/CD.
 
 ## 21. State Locking
-- Prevents concurrent plan/apply corruption. Lock held for duration of run.
-- `ACQUIRING STATE LOCK` error: check if another run is genuinely active → wait; if holder crashed, confirm with team → `terraform force-unlock <LOCK_ID>` only after confirming safe.
+
+DynamoDB (AWS, traditional) / native locking (TFC, azurerm, GCS, or newer S3 native lockfile). Prevents concurrent plan/apply from corrupting state. Lock held for the duration of plan/apply.
+
+**"Error acquiring state lock" — troubleshooting steps**:
+1. Read the error (LockID, Who, Operation, Created time)
+2. Check if another pipeline run is genuinely in progress → wait
+3. If holder crashed (stale lock), confirm with team before acting
+4. `terraform force-unlock <LOCK_ID>` — only after confirming it's safe
+5. Root-cause: pipeline killed mid-run, network drop, manual Ctrl+C
 
 ## 22. Provisioners
-- `local-exec` / `remote-exec` — last resort, prefer native resources.
-- Creation-time vs `when = destroy`.
-- `connection{}` block — SSH/WinRM for remote-exec.
 
-## 23. Secrets
-- Never hardcode in `.tf` or commit `.tfvars` with secrets.
-- Source from Vault, AWS SSM/Secrets Manager, Azure Key Vault.
-- Pass via data source / `TF_VAR_*` env vars.
-- `.gitignore`: `*.tfstate`, `*.tfvars`, `.terraform/`
-- **Ephemeral resources/values (1.10+)**: values that never persist to state — gap most 3 YOE candidates miss when asked "how do you avoid secrets landing in state at all."
+`local-exec` / `remote-exec` — treated as a **last resort**; prefer native resources/config management (Ansible) instead. `when = destroy` for destroy-time provisioners. `connection{}` block for SSH/WinRM.
+
+**Real-time**: Instead of `remote-exec` to install a package on a new EC2, hand off to your Ansible playbook (fits your existing Ansible skill) via `user_data` or a post-provision pipeline stage.
+
+## 23. Secrets Management
+
+Never hardcode secrets in `.tf` or commit `.tfvars` with secrets. Source from Vault, AWS SSM Parameter Store/Secrets Manager, Azure Key Vault. Pass via data source or `TF_VAR_*` env vars, not literals. `sensitive = true` masks CLI output only — **value is still plaintext in state**, so state encryption is still required. `.gitignore`: `*.tfstate`, `*.tfvars` (if secret-bearing), `.terraform/`.
 
 ## 24. Tagging Strategy
-- Consistent: Environment, Owner, Project, CostCenter, ManagedBy.
-- `default_tags` (AWS provider) reduces per-resource repetition.
 
-## 25. Testing & Validation (expanded)
-- `terraform validate`, `fmt -check` (CI gate)
-- `tflint` — linting, provider-specific rules
-- `checkov` / `tfsec` — static security/compliance scanning
-- `terraform plan -detailed-exitcode` (0=no change, 1=error, 2=changes)
-- **`terraform test` (1.6+)** — native `.tftest.hcl` test framework, run/assert blocks — increasingly asked at 3 YOE level.
-- **Infracost** — cost estimation on PRs, commonly paired with the fmt→validate→plan pipeline.
+Consistent tags: `Environment`, `Owner`, `Project`, `CostCenter`, `ManagedBy`. `default_tags` on the AWS provider auto-applies tags to every resource in that provider config — reduces repetition, supports cost allocation and automation exclusion.
+
+## 25. Testing & Static Analysis
+
+`terraform validate`, `terraform fmt -check` (CI gate). `tflint` for linting/provider rules. `checkov` / `tfsec` for static security/compliance scanning. `terraform plan -detailed-exitcode` (0 = no changes, 1 = error, 2 = changes — useful for CI branching logic).
+
+**Missing but worth knowing at 3 YoE**: native `terraform test` framework (`.tftest.hcl` files, `run` blocks, assertions) — HashiCorp's built-in alternative to Terratest for unit/integration testing modules. Also **Infracost** for cost estimation on PRs before apply.
 
 ## 26. CI/CD Integration
-- Pipeline: `fmt → validate → plan → manual approval → apply`
-- Plan output posted as PR artifact/comment before apply.
-- Separate service principal/IAM role per environment.
-- **Atlantis** — self-hosted PR-driven plan/apply automation with locking, common in orgs not on Terraform Cloud.
+
+Standard pipeline: `fmt → validate → plan → manual approval → apply`. Plan output posted as PR artifact/comment before apply. Remote backend handles locking across pipeline runs. Use a **separate service principal/IAM role per environment** (least privilege, blast-radius control).
+
+**Missing topic — Atlantis**: a popular open-source tool that automates this exact plan/apply-on-PR workflow via PR comments (`atlantis plan`, `atlantis apply`) — commonly asked about alongside GitHub Actions/Jenkins pipelines for Terraform.
 
 ## 27. Terraform Cloud/Enterprise
-- Remote runs, VCS-driven workflow, built-in remote state + locking.
-- Sentinel / OPA — policy-as-code gates before apply.
-- Private module + provider registry, RBAC, run triggers.
+
+Remote runs, VCS-driven workflow, remote state + locking built-in. **Sentinel** / **OPA** = policy-as-code gates before apply (e.g., "no public S3 buckets allowed," enforced automatically, not just by code review). Private module + provider registry, RBAC, run triggers.
 
 ## 28. Common Errors
-- Provider version conflicts → pin versions, delete `.terraform` & re-init.
-- Cyclic dependency → refactor implicit refs / `depends_on`.
-- "Resource already exists" → import instead of recreate.
 
-## 29. Best Practices
-- Small, composable modules; remote state + locking always.
-- Consistent naming/tagging; never edit state manually.
-- Pin provider/module versions; review plan before every apply.
-- Separate state per environment; least-privilege execution role.
+- Provider version conflicts → pin versions, delete `.terraform/` and re-init
+- Cyclic dependency errors → refactor implicit refs / `depends_on`
+- "Resource already exists" → import instead of recreate
+
+## 29. Missing Topics Worth Adding at 3-4 YoE
+
+- **Terragrunt**: a thin DRY wrapper around Terraform — keeps backend/provider config non-repetitive across many environments. Frequently asked "have you used it / why not" in interviews even if you only use native Terraform.
+- **`moved` block** (1.1+): declares a resource/module was renamed/moved in code without triggering destroy-recreate — the declarative alternative to `terraform state mv`.
+- **`terraform_data` resource** (1.4+): replacement for the old `null_resource` + `triggers`, used to force actions on arbitrary value changes.
+- **`terraform console`**: interactive REPL to test expressions/functions against current state — handy for debugging complex `for` expressions before putting them in code.
+- **`TF_LOG`** env var (`TRACE/DEBUG/INFO/WARN/ERROR`) for provider-level debugging when a provider call fails mysterously.
+- **Provider plugin caching** (`plugin_cache_dir`) to speed up `init` across many environment directories in CI.
 
 ---
 
 # Top 15 Scenario-Based Interview Questions
 
-**1. Two engineers ran `apply` at the same time and one got "Error acquiring state lock." What do you do?**
-Check the lock error for LockID/Who/Operation/time. Confirm with the team whether the holding run is genuinely still in progress — if yes, wait. If the process crashed/was killed, confirm it's truly dead before running `terraform force-unlock <LOCK_ID>`. Never force-unlock blindly; root-cause it (pipeline killed mid-run, network drop, Ctrl+C) and fix the underlying trigger.
+**1. Two engineers ran `apply` on the same state at the same time. What actually stopped a corruption, and what would you check first if you saw a stuck lock?**
+State locking (DynamoDB or backend-native) blocks the second `apply` until the first finishes. If a lock looks stuck, read the lock's Who/Operation/Created-time, confirm with the team whether that run actually crashed, and only then run `force-unlock` — never force it blindly.
 
-**2. Someone manually deleted a resource from the AWS console that Terraform manages. Next `plan` shows it will recreate it — is that safe?**
-Depends on intent. If the deletion was accidental, let `plan`/`apply` recreate it. If it was a deliberate manual change you want to keep, either `terraform state rm` (if you truly want to stop tracking it) or re-import it and reconcile config to match reality, then handle drift with `ignore_changes` if that field will keep drifting legitimately.
+**2. A junior removed the third of five items from a `count`-based resource block and it wanted to destroy and recreate items 4 and 5. Why, and how do you prevent it?**
+`count` indexes are positional — removing an item shifts every later index, so Terraform sees "different" resources at those indices. Refactor to `for_each` over a map/set, which keys by stable identity, not position.
 
-**3. Your state file is corrupted and you have no S3 versioning enabled. How do you recover?**
-Rebuild by writing resource blocks that match the real infra and running `terraform import` per resource — no shortcut. This is exactly why DR checklists mandate S3 versioning + periodic backup-restore testing before this ever happens in prod.
+**3. Your team's ASG desired_capacity keeps showing as drift on every plan even though nobody touched it. Fix?**
+An autoscaler is adjusting `desired_capacity` at runtime outside Terraform. Add `lifecycle { ignore_changes = [desired_capacity] }` so Terraform stops treating scaler-driven changes as drift.
 
-**4. You need to rename a resource in code (e.g., refactor `aws_instance.web` to `aws_instance.app_web`) without destroying and recreating it. How?**
-Use `terraform state mv aws_instance.web aws_instance.app_web`, or in 1.5+ use a `moved` block in code so the refactor is reviewable and repeatable across environments instead of a manual one-off CLI operation.
+**4. You need to reference a VPC that another team manages in a separate state file. How, without duplicating their Terraform code?**
+Use `terraform_remote_state` data source pointed at their backend (read-only), or better, have them expose it via an `output` and consume via `data` sources — requires read IAM access to their backend.
 
-**5. A resource's tags keep drifting because an autoscaler/Lambda updates them outside Terraform. `plan` always shows a diff. How do you handle it?**
-Add `lifecycle { ignore_changes = [tags] }` (or the specific drifting attribute) on that resource so Terraform stops flagging expected external drift, while still managing everything else about the resource.
+**5. Someone accidentally ran `apply` against prod with a stale local plan file. How do you prevent this going forward?**
+Enforce a pipeline: `plan -out=plan.tfplan` as an artifact, mandatory manual approval, then `apply plan.tfplan` — never a fresh ad-hoc apply against prod, and no local applies allowed against the prod backend (separate role/credentials).
 
-**6. You have 50 near-identical S3 buckets to create with slightly different names. `count` or `for_each`?**
-`for_each` with a map/set — keyed by name/identifier, so removing one bucket from the middle of the list doesn't shift indices and force-recreate/reorder unrelated resources the way `count` would.
+**6. Your state file got corrupted/partially lost with no recent backup. Walk through recovery.**
+Check S3 versioning for a prior good object version and restore via `state push`. If truly gone, rebuild via `terraform import` per resource against a matching `resource` block (import brings state only, not config, so you write the HCL first — or use `-generate-config-out` in newer versions).
 
-**7. How do you structure Terraform for dev/stage/prod so a bad `apply` in dev can never touch prod?**
-Separate env directories, each with its own backend config and state file (not just `terraform.workspace` switching on one backend). Different IAM roles/service principals per environment, shared logic pulled from a common `modules/` folder to avoid duplication while keeping blast radius fully isolated.
+**7. You want to rename a resource in code without Terraform destroying and recreating the real infrastructure. How?**
+`terraform state mv old_addr new_addr` (imperative), or the declarative `moved {}` block (1.1+) committed alongside the rename so anyone running plan gets the same non-destructive result.
 
-**8. Your `plan` fails after a provider version bump with an unfamiliar error. First 3 steps?**
-Read the exact error for the specific incompatible argument/resource. Check `.terraform.lock.hcl` and provider changelog for breaking changes. If needed, delete `.terraform/` and re-`init` to force clean re-resolution, then pin the provider version explicitly with `~>` until you can test the upgrade properly.
+**8. A `sensitive = true` variable holding a DB password — is it actually protected?**
+Only from CLI/log output. The raw value is still stored in plaintext inside the state file, so the backend itself (S3 bucket, etc.) must be encrypted (SSE) and access-restricted — `sensitive` alone is not enough.
 
-**9. How do you make sure secrets (DB password, API keys) never end up committed or exposed via `plan` output?**
-Never hardcode in `.tf`; source from Vault/AWS Secrets Manager/SSM via data source, mark the variable `sensitive = true` to mask CLI/log output, and `.gitignore` any `.tfvars` holding secrets. Note `sensitive` only masks display — the value is still in state plaintext, so the backend itself (e.g., S3) must be encrypted too. For values that must never even touch state, use ephemeral resources (1.10+).
+**9. Multiple environments need the same VPC/EKS module but different sizing and account isolation. Workspaces or separate directories — which and why?**
+Separate environment directories for true isolation (different backends, blast radius, approvers, credentials per env), sharing logic via a common `modules/` folder. Workspaces are acceptable for light, same-account variation but are not a full substitute for prod-grade separation.
 
-**10. Team X owns the VPC/network Terraform, Team Y owns the app layer and needs the private subnet ID. How do they share that without merging state or repos?**
-Team Y's config uses a `terraform_remote_state` data source pointing at Team X's backend (read-only), pulling `module.vpc.private_subnet_id` as an output. Keeps both teams' state fully decoupled while allowing composition; requires Team Y to have read access to Team X's state backend.
+**10. Your CI pipeline needs to know whether `plan` found any changes, to decide whether to require approval.**
+Use `terraform plan -detailed-exitcode`: exit code 0 = no changes (auto-skip approval), 1 = error, 2 = changes detected (require approval gate) — branch pipeline logic on that exit code.
 
-**11. `apply` partially fails halfway through creating 10 resources. What's your next move?**
-Don't panic-destroy. Run `terraform plan` again — Terraform's state now reflects what succeeded, and plan will show only the remaining diff to reconcile. Investigate the specific failure (quota limit, IAM permission, naming conflict) and fix root cause before re-running `apply`.
+**11. A resource block references another resource's attribute, but occasionally Terraform tries to create them in the wrong order.**
+Implicit dependency via attribute reference should auto-order this correctly in the DAG; if there's genuinely no attribute reference (e.g., IAM eventual consistency, cross-service timing) add explicit `depends_on`.
 
-**12. How would you enforce that nobody can `apply` a change that violates your org's security/compliance policy (e.g., an open security group) before it reaches prod?**
-Wire `checkov`/`tfsec` into the CI pipeline as a gate before `plan`/`apply` can proceed, and/or use Sentinel/OPA policy-as-code in Terraform Cloud/Enterprise to block non-compliant plans automatically — not just rely on manual PR review.
+**12. You need to enforce "no public S3 buckets" org-wide, not just rely on PR review.**
+Policy-as-code: Sentinel (Terraform Cloud/Enterprise) or OPA, run as a mandatory gate before apply — reviewer error can't bypass a hard policy check the way it can bypass a human reviewer.
 
-**13. Explain the trade-off between one giant Terraform state for the whole account vs many small state files per layer/env.**
-One giant state = simpler mental model but huge blast radius (any bad apply can touch everything) and slow plans as the state grows. Many small states (per env, per layer like network/platform/app) = smaller/faster plans, independent team ownership, isolated blast radius — but adds complexity via more `terraform_remote_state` cross-lookups to wire outputs between them. Most prod orgs choose the split.
+**13. Your `.tf` files reference a provider version that changed behavior after a teammate ran `init` fresh and got a different provider version than you.**
+`.terraform.lock.hcl` wasn't committed, or someone deleted it. It should always be committed — it pins the exact resolved provider version so every teammate and CI run gets identical behavior; `required_providers{}` version constraints alone only set a range, not an exact pin.
 
-**14. A junior engineer wants to skip `plan` and go straight to `-auto-approve apply` in prod CI to save time. How do you push back?**
-Explain `plan` is the only safety check before real infra changes apply — `-auto-approve` in prod removes the human review gate entirely. Keep `fmt → validate → plan → manual approval → apply` in prod pipelines; `-auto-approve` is acceptable only in ephemeral/dev/test environments with low blast radius, and even there `plan` output should still be visible in logs.
+**14. You're asked to reduce blast radius on a monolithic Terraform config that manages network, EKS, and app resources in one state file.**
+Split by layer into separate state files (network / platform / app), each independently owned and planned, wired together via `terraform_remote_state` outputs — trades a bit of cross-state lookup complexity for much smaller, faster, safer plans per team.
 
-**15. How do you test a module before it's used across 5 different environments?**
-Use `terraform test` (1.6+) with `.tftest.hcl` run/assert blocks to validate module behavior in isolation with mock/test inputs, plus `tflint`/`checkov` for static checks. Validate in a throwaway/dev environment first, pin the module version, and only bump the version constraint in prod environments after it's proven out — never point prod directly at an unpinned/`main` branch module source.
+**15. A `remote-exec` provisioner to install software on a new EC2 instance is flaky in CI (SSH timing issues).**
+Provisioners are a last resort and fragile by design (they depend on network/SSH timing outside Terraform's control). Prefer baking the software into the AMI (Packer) or handing configuration to Ansible/`user_data` post-boot instead of `remote-exec`.

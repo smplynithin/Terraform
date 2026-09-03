@@ -214,6 +214,99 @@ Remote runs, VCS-driven workflow, remote state + locking built-in. **Sentinel** 
 - **`TF_LOG`** env var (`TRACE/DEBUG/INFO/WARN/ERROR`) for provider-level debugging when a provider call fails mysterously.
 - **Provider plugin caching** (`plugin_cache_dir`) to speed up `init` across many environment directories in CI.
 
+
+# Terraform Production Folder Structure (Real-World)
+
+```
+terraform-infra/
+├── modules/
+│   ├── vpc/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── versions.tf
+│   ├── eks/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── versions.tf
+│   ├── rds/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── versions.tf
+│   ├── ec2/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   └── alb/
+│       ├── main.tf
+│       ├── variables.tf
+│       └── outputs.tf
+│
+├── environments/
+│   ├── dev/
+│   │   ├── backend.tf          # remote state config, own S3 key
+│   │   ├── main.tf             # calls modules with dev-sized inputs
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── terraform.tfvars
+│   │   └── provider.tf
+│   ├── stage/
+│   │   ├── backend.tf
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── terraform.tfvars
+│   │   └── provider.tf
+│   └── prod/
+│       ├── backend.tf
+│       ├── main.tf
+│       ├── variables.tf
+│       ├── outputs.tf
+│       ├── terraform.tfvars
+│       └── provider.tf
+│
+├── global/
+│   ├── iam/
+│   │   ├── main.tf              # cross-account roles, org policies
+│   │   └── outputs.tf
+│   └── dns/
+│       ├── main.tf              # Route53 zones shared across envs
+│       └── outputs.tf
+│
+├── policies/                    # optional — OPA/Sentinel or Checkov rules
+│   └── no-public-s3.rego
+│
+├── scripts/
+│   ├── init.sh                  # wrapper: terraform init -backend-config=...
+│   └── plan-all-envs.sh
+│
+├── .github/
+│   └── workflows/
+│       └── terraform.yml        # fmt -> validate -> plan -> approval -> apply
+│
+├── .gitignore                   # .terraform/, *.tfstate, *.tfvars (if secret), crash.log
+├── .terraform.lock.hcl          # one per environment dir, always committed
+└── README.md
+```
+
+## Why it's structured this way
+
+**`modules/`** — reusable building blocks only. No environment-specific values live here; everything comes in via `variables.tf`. One module = one piece of infra (vpc, eks, rds), each independently testable.
+
+**`environments/<env>/`** — the actual root configs that get `init`/`plan`/`apply`'d. Each has its **own backend** (own S3 state key, e.g. `env:/prod/network/terraform.tfstate`), own tfvars, and often its own IAM role/service principal. This is what gives you real blast-radius isolation — a mistake in `dev/main.tf` can't touch prod state, because prod state literally lives elsewhere with different credentials.
+
+**`global/`** — account-level resources that don't belong to any single environment (IAM roles, Route53 zones, org-wide guardrails). Usually its own state file too.
+
+**Real-time flow at HCL-scale**: platform team owns `modules/vpc` and `modules/eks`; app teams only ever touch their own `environments/<team>/<env>/main.tf`, referencing the shared modules by version (`source = "git::https://.../modules//vpc?ref=v1.4.0"`). Nobody edits `modules/` directly without a version bump — that's how you avoid one team's change silently breaking another team's plan.
+
+**One state file per env + per layer** (as in your revision notes) — network/platform/app split further under each `environments/<env>/` in bigger orgs, e.g. `environments/prod/network/`, `environments/prod/eks/`, `environments/prod/app/`, each with its own backend key, wired together via `terraform_remote_state`.
+
+## Common mistake to avoid
+
+Putting `provider{}` config with hardcoded credentials inside `modules/` — providers belong in the **root** (`environments/<env>/provider.tf`), modules should stay provider-config-agnostic so the same module works across accounts/regions.
+
 ---
 
 # Top 15 Scenario-Based Interview Questions

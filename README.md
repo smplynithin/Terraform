@@ -438,6 +438,33 @@ Implicit dependency via attribute reference should auto-order this correctly in 
 
 **12. You need to enforce "no public S3 buckets" org-wide, not just rely on PR review.**
 Policy-as-code: Sentinel (Terraform Cloud/Enterprise) or OPA, run as a mandatory gate before apply — reviewer error can't bypass a hard policy check the way it can bypass a human reviewer.
+Problem: relying on PR review alone to catch bad infra (e.g., public S3 bucket) fails — reviewers miss things in large diffs, don't always know which attribute combos are dangerous, or are rushed. Review is a should-catch, not a can't-bypass.
+
+Fix: Policy-as-Code — Sentinel (Terraform Cloud/Enterprise) or OPA (anywhere) — evaluates the Terraform plan as a hard gate before apply. Fail the policy, pipeline stops, apply never runs, regardless of who approved the PR.
+
+Pipeline shape:
+
+fmt → validate → plan → [POLICY CHECK] → manual approval → apply
+
+Example — OPA rule blocking public S3 buckets:
+
+rego
+package main
+
+deny[msg] {
+  resource := input.resource_changes[_]
+  resource.type == "aws_s3_bucket_public_access_block"
+  resource.change.after.block_public_acls == false
+  msg := sprintf("%s allows public ACLs — blocked", [resource.address])
+}
+bash
+terraform plan -out=plan.tfplan
+terraform show -json plan.tfplan > plan.json
+conftest test plan.json -p policies/
+
+If conftest fails, the GitHub Actions apply step (gated with if: success()) never executes.
+
+Limitation to know: this only guards the pipeline path. Console access, a stray aws s3api CLI call, or a different tool entirely bypasses OPA completely — it never sees those actions.
 
 **13. Your `.tf` files reference a provider version that changed behavior after a teammate ran `init` fresh and got a different provider version than you.**
 `.terraform.lock.hcl` wasn't committed, or someone deleted it. It should always be committed — it pins the exact resolved provider version so every teammate and CI run gets identical behavior; `required_providers{}` version constraints alone only set a range, not an exact pin.

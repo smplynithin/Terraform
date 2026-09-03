@@ -100,6 +100,9 @@ Backend block allows partial config (`-backend-config=` at init) and **cannot us
 
 Modules never talk to each other directly — the root module wires them: `module.vpc.private_subnet_id` passed as an input to `module "ec2"`.
 
+<img width="709" height="641" alt="image" src="https://github.com/user-attachments/assets/06cf817d-fcfc-4c76-ac51-0daca419b957" />
+
+
 ## 12. Module Design
 
 ```

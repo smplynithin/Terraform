@@ -303,7 +303,8 @@ Remote runs, VCS-driven workflow, remote state + locking built-in. **Sentinel** 
 - **`TF_LOG`** env var (`TRACE/DEBUG/INFO/WARN/ERROR`) for provider-level debugging when a provider call fails mysterously.
 - **Provider plugin caching** (`plugin_cache_dir`) to speed up `init` across many environment directories in CI.
 
-  <img width="695" height="742" alt="image" src="https://github.com/user-attachments/assets/17a4485e-16fc-46d9-b828-53eac6d834c5" />
+<img width="635" height="829" alt="image" src="https://github.com/user-attachments/assets/946c3a43-c1e1-4479-994e-1f2e0f8a4602" />
+
 
 
 **erraform Monolithic State → Multiple State Files

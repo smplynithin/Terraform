@@ -303,6 +303,50 @@ Remote runs, VCS-driven workflow, remote state + locking built-in. **Sentinel** 
 - **`TF_LOG`** env var (`TRACE/DEBUG/INFO/WARN/ERROR`) for provider-level debugging when a provider call fails mysterously.
 - **Provider plugin caching** (`plugin_cache_dir`) to speed up `init` across many environment directories in CI.
 
+**erraform Monolithic State → Multiple State Files
+**1. BACKUP EXISTING STATE
+        ↓
+2. CREATE MODULES
+   modules/
+   ├── vpc/
+   ├── eks/
+   └── rds/
+        ↓
+3. CREATE SEPARATE ROOT CONFIGURATIONS
+   vpc/
+   ├── main.tf
+   ├── variables.tf
+   ├── outputs.tf
+   └── backend.tf
+
+   eks/
+   ├── main.tf
+   ├── variables.tf
+   ├── outputs.tf
+   └── backend.tf
+        ↓
+4. CONFIGURE DIFFERENT BACKEND KEYS
+   vpc → prod/vpc/terraform.tfstate
+   eks → prod/eks/terraform.tfstate
+   rds → prod/rds/terraform.tfstate
+        ↓
+5. INITIALIZE EACH CONFIGURATION
+   terraform init
+        ↓
+6. MOVE RESOURCES FROM OLD STATE
+   terraform state mv ...
+        ↓
+7. VERIFY
+   terraform plan
+   → No unwanted create/destroy
+        ↓
+8. HANDLE CROSS-STATE DEPENDENCIES
+   VPC outputs
+        ↓
+   terraform_remote_state DATA BLOCK
+        ↓
+   EKS
+
 
 # Terraform Production Folder Structure (Real-World)
 

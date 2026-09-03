@@ -177,7 +177,83 @@ DynamoDB (AWS, traditional) / native locking (TFC, azurerm, GCS, or newer S3 nat
 
 ## 23. Secrets Management
 
-Never hardcode secrets in `.tf` or commit `.tfvars` with secrets. Source from Vault, AWS SSM Parameter Store/Secrets Manager, Azure Key Vault. Pass via data source or `TF_VAR_*` env vars, not literals. `sensitive = true` masks CLI output only — **value is still plaintext in state**, so state encryption is still required. `.gitignore`: `*.tfstate`, `*.tfvars` (if secret-bearing), `.terraform/`.
+Never hardcode secrets in `.tf` or commit `.tfvars` with secrets. Source from Vault, AWS SSM Parameter Store/Secrets Manager, Azure Key Vault. Pass via data source or `TF_VAR_*` env vars, not literals. `sensitive = true` masks CLI output only — **value is still plaintext in state**, so state encryption is still required. `.gitignore`: `*.tfstate`, `*.tfvars` (if secret-bearing), `.terraform/`
+# Injecting AWS Secrets into Terraform & Ansible
+
+## 1. Terraform — pulling secrets from AWS
+
+Use a `data` source. Never hardcode a secret in a `resource`, `variable` default, or `.tfvars`.
+
+**Secrets Manager**:
+```hcl
+data "aws_secretsmanager_secret_version" "db" {
+  secret_id = "prod/db/password"
+}
+
+resource "aws_db_instance" "main" {
+  password = data.aws_secretsmanager_secret_version.db.secret_string
+}
+```
+
+**SSM Parameter Store** (simpler key-value config):
+```hcl
+data "aws_ssm_parameter" "db_pass" {
+  name            = "/prod/db/password"
+  with_decryption = true
+}
+```
+
+**Caveat**: even fetched this way, the value still lands in **plaintext inside the Terraform state file** once used in a resource attribute. This approach keeps the secret out of `.tf`/`.tfvars`/git — it does not remove the need to encrypt the state backend (SSE on the S3 bucket).
+
+## 2. Ansible — pulling secrets from AWS
+
+**Secrets Manager**:
+```yaml
+vars:
+  db_password: "{{ lookup('amazon.aws.aws_secret', 'prod/db/password') }}"
+```
+
+**SSM Parameter Store**:
+```yaml
+vars:
+  db_password: "{{ lookup('amazon.aws.aws_ssm', '/prod/db/password', decrypt=True) }}"
+```
+
+Both require `boto3`/`botocore` on the control node and IAM permission (`secretsmanager:GetSecretValue` or `ssm:GetParameter`) on whatever identity Ansible runs as.
+
+## 3. How they connect in a real pipeline
+
+Terraform provisions the Secrets Manager entry / SSM parameter (or security team does it out-of-band) → Ansible, running later in the same pipeline against the infra Terraform just built, pulls the value live via the lookup plugin at runtime. Neither tool ever stores the secret on disk or in git — it's fetched on-demand from AWS, gated purely by IAM.
+
+## 4. Two separate requirements: permission vs credentials
+
+**IAM permission** — always required, everywhere. Whatever identity runs `terraform apply` or `ansible-playbook` must be authorized (via policy) for the specific action (`secretsmanager:GetSecretValue`, `ssm:GetParameter`) on that specific secret's ARN. No permission, no fetch, regardless of how credentials are supplied.
+
+**AWS credentials** — *how* that identity authenticates. Two approaches:
+
+| Approach | What it looks like | Verdict |
+|---|---|---|
+| Static credentials | `aws configure`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars, credentials file | Avoid for anything long-lived — leak risk, no auto-rotation, extra audit burden |
+| IAM role on the compute | Instance profile (EC2), IRSA (EKS pod), OIDC federation (CI runner), STS assume-role (local) | Best practice — SDK auto-discovers short-lived temp creds, nothing to store or type |
+
+## 5. Where each execution context gets its identity
+
+- **EC2 running Terraform/Ansible** → IAM role attached as an instance profile
+- **EKS pod** (e.g. CI runner or AWX pod in-cluster) → IRSA (IAM Roles for Service Accounts)
+- **GitHub Actions / Jenkins pipeline** → OIDC federation: the job authenticates to AWS via OIDC, assumes an IAM role, gets short-lived STS credentials for that run only — no long-lived keys stored in GitHub Secrets or Jenkins credentials store at all
+- **Local machine (dev/testing `terraform plan` before pushing)** → `aws sso login` or `assume-role` for temporary creds, not permanent access keys in `~/.aws/credentials`
+
+## 6. Pipeline vs local — what "no configuration needed" actually means
+
+**Pipeline run**: no static credential configuration required. OIDC → assume role → short-lived STS credentials, automatically, per job run.
+
+**Not credential-free by accident**: someone still has to set up the OIDC trust relationship + IAM role once — a trust policy scoped to the specific GitHub repo/branch. That one-time IAM setup is itself usually done via Terraform, and is worth being able to explain in an interview rather than just "the pipeline handles it."
+
+**Local machine**: still used for `terraform plan` while writing/testing code before it hits the pipeline — normal dev workflow. The correction isn't "no config on local," it's "no *static* long-lived credentials, anywhere — local or pipeline." Local uses temporary SSO/assume-role credentials instead.
+
+## 7. Senior-level framing for interviews
+
+"Credentials configured" signals static keys. "IAM role attached to the execution identity" signals you understand least-privilege and rotation. Lead with the second phrasing.
 
 ## 24. Tagging Strategy
 

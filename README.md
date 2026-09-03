@@ -413,7 +413,13 @@ Use `terraform_remote_state` data source pointed at their backend (read-only), o
 Enforce a pipeline: `plan -out=plan.tfplan` as an artifact, mandatory manual approval, then `apply plan.tfplan` — never a fresh ad-hoc apply against prod, and no local applies allowed against the prod backend (separate role/credentials).
 
 **6. Your state file got corrupted/partially lost with no recent backup. Walk through recovery.**
-Check S3 versioning for a prior good object version and restore via `state push`. If truly gone, rebuild via `terraform import` per resource against a matching `resource` block (import brings state only, not config, so you write the HCL first — or use `-generate-config-out` in newer versions).
+A: First, confirm the issue — terraform state list or plan will error or show resources it wants to recreate that already exist.
+
+If S3 versioning is enabled (should be, always, on prod state buckets): list object versions, pull the last known-good version, validate it locally, then restore it live with terraform state push. This is the clean recovery path — it restores the exact prior state, including metadata you can't rebuild by hand.
+
+If there's truly no backup: rebuild state manually via terraform import <address> <id> per resource. Key point — import writes state only, not config, so the matching resource block must already exist in .tf or the next plan shows a huge diff. In Terraform 1.5+, import {} blocks with plan -generate-config-out auto-generate the HCL instead of writing it by hand — faster and less error-prone than the old manual workflow.
+
+Prevention (what I'd flag as the real fix): S3 versioning + SSE encryption on every state bucket, pre-change state pull backups in the pipeline before every apply, and periodically testing restore — so this scenario shouldn't happen in the first place.
 
 **7. You want to rename a resource in code without Terraform destroying and recreating the real infrastructure. How?**
 `terraform state mv old_addr new_addr` (imperative), or the declarative `moved {}` block (1.1+) committed alongside the rename so anyone running plan gets the same non-destructive result.
